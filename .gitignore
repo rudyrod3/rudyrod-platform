@@ -1,0 +1,14 @@
+# Terraform (commit .terraform.lock.hcl, ignore state and plans)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+crash.log
+# Python
+__pycache__/
+*.pyc
+.venv/
+# Local secrets
+.env
+*.pem
