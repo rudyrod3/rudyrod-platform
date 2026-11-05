@@ -17,4 +17,4 @@ configMapGenerator:
     literals:
       # Lambda Function URL from `terraform output -raw function_url` (Phase 3).
       # Empty until then; the heartbeat exits with "STATUS_API_URL must be set".
-      - STATUS_API_URL=
+      - STATUS_API_URL=https://bvno6y53db36scsf3mqqag5vba0vnzbb.lambda-url.us-west-2.on.aws/
