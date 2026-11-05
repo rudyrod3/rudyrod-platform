@@ -10,11 +10,11 @@ images:
   - name: ghcr.io/rudyrod3/rudyrod-platform
     # Written by CI's "deploy: bump image" PR (Phase 4). Until then, set it by
     # hand to the digest of the first image pushed from the VM.
-    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    digest: sha256:40ed20e1a07827414ab61a8b611fc9c8199e83ed7a6e3116ca4f09d5a2a608fe
 
 configMapGenerator:
   - name: showcase-config
     literals:
       # Lambda Function URL from `terraform output -raw function_url` (Phase 3).
-      # Empty until then; the heartbeat exits with "STATUS_API_URL must be set".
+      # Public by design: heartbeats are authenticated by their HMAC signature.
       - STATUS_API_URL=https://bvno6y53db36scsf3mqqag5vba0vnzbb.lambda-url.us-west-2.on.aws/
