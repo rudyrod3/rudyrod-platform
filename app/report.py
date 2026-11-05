@@ -180,8 +180,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, indent=2))
         return 0
 
-    key = os.getenv("HMAC_KEY")
-    url = os.getenv("STATUS_API_URL")
+    # Strip so a trailing newline from `kubectl create secret --from-file` can't break signatures.
+    key = os.getenv("HMAC_KEY", "").strip()
+    url = os.getenv("STATUS_API_URL", "").strip()
     if not key or not url:
         log("error", "HMAC_KEY and STATUS_API_URL must be set")
         return 2
