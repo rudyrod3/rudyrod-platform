@@ -1,0 +1,5 @@
+# Allowlist: the image only needs the app package.
+*
+!app/
+app/**/__pycache__
+app/**/*.pyc
