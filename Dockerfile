@@ -8,7 +8,7 @@ FROM ${PYTHON_IMAGE} AS builder
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 COPY app/requirements.txt /tmp/requirements.txt
-RUN pip install --no-compile --target /opt/deps -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --no-compile --target /opt/deps -r /tmp/requirements.txt
 
 # ---- runtime: no pip, no build tools, non-root, read-only friendly ----
 FROM ${PYTHON_IMAGE}

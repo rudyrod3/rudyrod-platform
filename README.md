@@ -215,3 +215,66 @@ curl -s -X POST "${URL}visit"                              # {"visits": 1}
 
 Errors from the heartbeat: **401** means the Secret and SSM keys differ, or the VM clock is
 off by more than 5 minutes; **409** means a replayed or out-of-order heartbeat.
+
+## CI/CD (`.github/workflows/`)
+
+Same flow as the site: `feature → staging → main`, and nothing reaches `staging` or `main`
+without a pull request and green checks.
+
+| Trigger | [platform-ci.yml](.github/workflows/platform-ci.yml) | [terraform.yml](.github/workflows/terraform.yml) |
+| --- | --- | --- |
+| PR into `staging` or `main` | ruff + pytest · hadolint · single-arch build + Trivy (when the image changed) · kubeconform · TruffleHog | `fmt` / `validate` / `plan` with the read-only role, posted as a PR comment (when `infra/` or `status_api/` changed) |
+| PR into `main` | **Promotion gate**: head must be `staging`, and the overlay digest must pass `cosign verify` against this workflow's staging identity | same |
+| Push to `staging` (image changed) | Multi-arch build → GHCR → Trivy gate → cosign sign → `BUILD#staging` record → **deploy PR** bumping the overlay digest, auto-merged when green | — |
+| Push to `main` | **No rebuild**: `cosign verify` the overlay digest → fresh Trivy counts → `BUILD#prod` record | `terraform apply`, after you approve it in the `aws` environment |
+
+The deploy PR only changes `k8s/overlays/live`, so merging it never triggers another build.
+Argo CD then syncs `showcase-staging`; promoting is a `staging → main` PR, which carries the
+already-tested digest to `showcase-prod`.
+
+### One-time GitHub setup
+
+Done through the API: auto-merge enabled, merged branches auto-deleted, `aws` environment
+(you as required reviewer, `main` only), `LAMBDA_RESERVED_CONCURRENCY=-1` (raise to `2` once
+the Lambda quota increase lands).
+
+**Repository variables** (Settings → Secrets and variables → Actions → Variables), from
+`terraform output`:
+
+| Variable | Value |
+| --- | --- |
+| `AWS_BUILD_ROLE_STAGING` / `AWS_BUILD_ROLE_PROD` | `build_writer_role_arns` |
+| `AWS_TF_PLAN_ROLE` / `AWS_TF_APPLY_ROLE` | `terraform_plan_role_arn` / `terraform_apply_role_arn` |
+| `TF_STATE_BUCKET` | your state bucket |
+| `DEPLOY_APP_CLIENT_ID` | the GitHub App's Client ID (below) |
+
+**Secrets:** `BUDGET_EMAIL` (`gh secret set BUDGET_EMAIL`) and `DEPLOY_APP_PRIVATE_KEY`.
+
+**GitHub App for deploy PRs.** PRs opened with the default `GITHUB_TOKEN` don't trigger
+workflows, so their required checks would never run.
+
+1. <https://github.com/settings/apps/new>: name it (e.g. `rudyrod-platform-deployer`), set the
+   homepage to this repo, and **uncheck Webhook → Active**.
+2. Repository permissions: **Contents: Read and write**, **Pull requests: Read and write**.
+   Installable: **Only on this account**. Create it.
+3. Copy the **Client ID** into the `DEPLOY_APP_CLIENT_ID` variable.
+4. **Generate a private key**, then `gh secret set DEPLOY_APP_PRIVATE_KEY < key.pem` and delete
+   the `.pem`.
+5. **Install App** → Only select repositories → `rudyrod-platform`.
+
+**GHCR package access.** The first image was pushed by hand, so the package isn't linked to
+this repo yet and CI's push would get `permission_denied`. Open the package settings
+(Packages → `rudyrod-platform` → Package settings) → **Manage Actions access** → add
+`rudyrod-platform` with **Write**.
+
+**Branch rulesets** (after the workflows have run once, so the check names exist): `staging`
+and `main` both require a pull request and the checks `Lint and test`, `Dockerfile lint`,
+`Build and scan image`, `Validate manifests`, `Secret scan`, `Promotion gate`, and
+`Terraform plan`, and block force pushes and deletion. Skipped checks count as passing, so
+`Promotion gate` only bites on `main` and `Terraform plan` only when infrastructure changed.
+
+### Rollback
+
+Revert the deploy PR's commit on `staging` (Argo CD rolls staging back), then promote the
+revert to `main`. In an emergency, `argocd app rollback showcase-prod` restores the previous
+revision immediately and the Git revert follows.
