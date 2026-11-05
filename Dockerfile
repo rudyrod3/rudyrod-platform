@@ -8,7 +8,7 @@ FROM ${PYTHON_IMAGE} AS builder
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 COPY app/requirements.txt /tmp/requirements.txt
-RUN pip install --no-compile --target /opt/deps -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --no-compile --target /opt/deps -r /tmp/requirements.txt
 
 # ---- runtime: no pip, no build tools, non-root, read-only friendly ----
 FROM ${PYTHON_IMAGE}
@@ -31,9 +31,11 @@ ENV PYTHONPATH=/opt/deps \
     BUILD_TIME=${BUILD_TIME} \
     APP_VERSION=${APP_VERSION}
 
-# pip is only needed at build time; dropping it shrinks the image and the CVE surface.
+# pip and apt are only needed at build time; dropping them shrinks the image and the
+# CVE surface (the service never installs anything at runtime).
 RUN python -m pip uninstall -y pip \
- && rm -rf /root/.cache
+ && dpkg --purge apt libapt-pkg7.0 \
+ && rm -rf /root/.cache /var/lib/apt /var/cache/apt /etc/apt
 
 COPY --from=builder /opt/deps /opt/deps
 COPY app /srv/app
