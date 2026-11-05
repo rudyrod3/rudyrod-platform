@@ -1,0 +1,31 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: showcase-prod
+  namespace: argocd
+  finalizers:
+    # Deleting the Application also deletes what it deployed.
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/rudyrod3/rudyrod-platform.git
+    targetRevision: main
+    path: k8s/overlays/live
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: showcase-prod
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - RespectIgnoreDifferences=true
+  # Lets `kubectl patch cronjob heartbeat -p '{"spec":{"suspend":true}}'`
+  # stick instead of being self-healed straight back.
+  ignoreDifferences:
+    - group: batch
+      kind: CronJob
+      name: heartbeat
+      jsonPointers:
+        - /spec/suspend

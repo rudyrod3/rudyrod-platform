@@ -1,0 +1,23 @@
+# Default deny: no pod in the namespace accepts traffic...
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress"]
+---
+# ...except the API, on its HTTP port only (for the Service and, later, cloudflared).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-http
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: showcase-api
+  policyTypes: ["Ingress"]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080
