@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1.7
 # Showcase service: FastAPI API (default CMD) + one-shot heartbeat report (python -m app.report).
 # Base pinned by multi-arch index digest; Dependabot bumps it.
-ARG PYTHON_IMAGE=python:3.13-slim@sha256:ae14d4ce8771606477a81446e7ef429edd6762305fc50c84507c1041fa8285d1
+ARG PYTHON_IMAGE=python:3.13-slim@sha256:e48f59cdba69a3cbd9ed2cf0f348d90d45a8d350d98134cf1070bc106ee9ed90
 
 # ---- builder: install pinned dependencies into an isolated prefix ----
 FROM ${PYTHON_IMAGE} AS builder
 ENV PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 COPY app/requirements.txt /tmp/requirements.txt
-RUN pip install --no-compile --target /opt/deps -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --no-compile --target /opt/deps -r /tmp/requirements.txt
 
 # ---- runtime: no pip, no build tools, non-root, read-only friendly ----
 FROM ${PYTHON_IMAGE}
@@ -31,9 +31,14 @@ ENV PYTHONPATH=/opt/deps \
     BUILD_TIME=${BUILD_TIME} \
     APP_VERSION=${APP_VERSION}
 
-# pip is only needed at build time; dropping it shrinks the image and the CVE surface.
-RUN python -m pip uninstall -y pip \
- && rm -rf /root/.cache
+# Apply Debian security fixes that have shipped since the base image was built (this
+# layer reruns on every commit, since GIT_SHA above changes). Then drop pip and apt:
+# the service never installs anything at runtime, so they're only CVE surface.
+RUN apt-get update \
+ && apt-get upgrade -y \
+ && python -m pip uninstall -y pip \
+ && dpkg --purge apt libapt-pkg7.0 \
+ && rm -rf /root/.cache /var/lib/apt /var/cache/apt /etc/apt
 
 COPY --from=builder /opt/deps /opt/deps
 COPY app /srv/app

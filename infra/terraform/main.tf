@@ -156,15 +156,15 @@ resource "aws_iam_openid_connect_provider" "github" {
   client_id_list = ["sts.amazonaws.com"]
 }
 
-# Trust policy for one exact GitHub OIDC subject, e.g. repo:o/r:ref:refs/heads/main.
+# Trust policy for one exact GitHub OIDC subject, e.g. <prefix>:ref:refs/heads/main.
 data "aws_iam_policy_document" "github_trust" {
   # Jobs that use a GitHub environment get an environment subject instead of a ref;
   # the `aws` environment only allows the main branch (set in repo settings).
   for_each = merge(
-    { for env, branch in local.envs : "build_${env}" => "repo:${var.github_repo}:ref:refs/heads/${branch}" },
+    { for env, branch in local.envs : "build_${env}" => "${var.github_oidc_sub_prefix}:ref:refs/heads/${branch}" },
     {
-      terraform_apply = "repo:${var.github_repo}:environment:aws"
-      terraform_plan  = "repo:${var.github_repo}:pull_request"
+      terraform_apply = "${var.github_oidc_sub_prefix}:environment:aws"
+      terraform_plan  = "${var.github_oidc_sub_prefix}:pull_request"
     },
   )
 
@@ -231,9 +231,24 @@ resource "aws_iam_role_policy_attachment" "gha_terraform_plan_readonly" {
 
 data "aws_iam_policy_document" "gha_terraform_plan_deny" {
   statement {
+    sid       = "NoParameterValues"
     effect    = "Deny"
-    actions   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "kms:Decrypt"]
+    actions   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
     resources = ["*"]
+  }
+
+  # Only SSM-initiated decryption is denied. A blanket kms:Decrypt deny also hides the
+  # Lambda's environment variables, so every plan showed them as being added.
+  statement {
+    sid       = "NoSsmDecrypt"
+    effect    = "Deny"
+    actions   = ["kms:Decrypt"]
+    resources = ["*"]
+    condition {
+      test     = "StringLike"
+      variable = "kms:ViaService"
+      values   = ["ssm.*.amazonaws.com"]
+    }
   }
 }
 

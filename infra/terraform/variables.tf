@@ -5,9 +5,20 @@ variable "region" {
 }
 
 variable "github_repo" {
-  description = "owner/name of the platform repo that GitHub Actions OIDC roles trust."
+  description = "owner/name of the platform repo (used for tags)."
   type        = string
   default     = "rudyrod3/rudyrod-platform"
+}
+
+variable "github_oidc_sub_prefix" {
+  description = <<-EOT
+    Prefix of the `sub` claim in this repo's GitHub OIDC tokens. The repo uses immutable
+    subjects (owner and repo IDs, not just names), so a deleted-and-recreated repo with the
+    same name can't assume these roles. Read it with:
+      gh api repos/rudyrod3/rudyrod-platform/actions/oidc/customization/sub --jq .sub_claim_prefix
+  EOT
+  type        = string
+  default     = "repo:rudyrod3@169416057/rudyrod-platform@1436720550"
 }
 
 variable "state_bucket" {
