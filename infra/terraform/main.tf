@@ -156,15 +156,15 @@ resource "aws_iam_openid_connect_provider" "github" {
   client_id_list = ["sts.amazonaws.com"]
 }
 
-# Trust policy for one exact GitHub OIDC subject, e.g. repo:o/r:ref:refs/heads/main.
+# Trust policy for one exact GitHub OIDC subject, e.g. <prefix>:ref:refs/heads/main.
 data "aws_iam_policy_document" "github_trust" {
   # Jobs that use a GitHub environment get an environment subject instead of a ref;
   # the `aws` environment only allows the main branch (set in repo settings).
   for_each = merge(
-    { for env, branch in local.envs : "build_${env}" => "repo:${var.github_repo}:ref:refs/heads/${branch}" },
+    { for env, branch in local.envs : "build_${env}" => "${var.github_oidc_sub_prefix}:ref:refs/heads/${branch}" },
     {
-      terraform_apply = "repo:${var.github_repo}:environment:aws"
-      terraform_plan  = "repo:${var.github_repo}:pull_request"
+      terraform_apply = "${var.github_oidc_sub_prefix}:environment:aws"
+      terraform_plan  = "${var.github_oidc_sub_prefix}:pull_request"
     },
   )
 
