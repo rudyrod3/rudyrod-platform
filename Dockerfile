@@ -31,9 +31,12 @@ ENV PYTHONPATH=/opt/deps \
     BUILD_TIME=${BUILD_TIME} \
     APP_VERSION=${APP_VERSION}
 
-# pip and apt are only needed at build time; dropping them shrinks the image and the
-# CVE surface (the service never installs anything at runtime).
-RUN python -m pip uninstall -y pip \
+# Apply Debian security fixes that have shipped since the base image was built (this
+# layer reruns on every commit, since GIT_SHA above changes). Then drop pip and apt:
+# the service never installs anything at runtime, so they're only CVE surface.
+RUN apt-get update \
+ && apt-get upgrade -y \
+ && python -m pip uninstall -y pip \
  && dpkg --purge apt libapt-pkg7.0 \
  && rm -rf /root/.cache /var/lib/apt /var/cache/apt /etc/apt
 
