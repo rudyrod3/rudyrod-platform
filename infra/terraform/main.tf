@@ -231,9 +231,24 @@ resource "aws_iam_role_policy_attachment" "gha_terraform_plan_readonly" {
 
 data "aws_iam_policy_document" "gha_terraform_plan_deny" {
   statement {
+    sid       = "NoParameterValues"
     effect    = "Deny"
-    actions   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath", "kms:Decrypt"]
+    actions   = ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"]
     resources = ["*"]
+  }
+
+  # Only SSM-initiated decryption is denied. A blanket kms:Decrypt deny also hides the
+  # Lambda's environment variables, so every plan showed them as being added.
+  statement {
+    sid       = "NoSsmDecrypt"
+    effect    = "Deny"
+    actions   = ["kms:Decrypt"]
+    resources = ["*"]
+    condition {
+      test     = "StringLike"
+      variable = "kms:ViaService"
+      values   = ["ssm.*.amazonaws.com"]
+    }
   }
 }
 
