@@ -1,0 +1,327 @@
+# Platform pipeline: checks on every PR, build-once on staging, promote-by-merge to main.
+#
+#   PR into staging/main   lint, tests, Dockerfile lint, image build + Trivy, manifest validation,
+#                          secret scan; PRs into main also pass the promotion gate
+#   push to staging        (app changed) multi-arch build -> GHCR -> Trivy -> cosign sign ->
+#                          BUILD#staging record -> "deploy: bump image" PR (auto-merges)
+#   push to main           no rebuild: cosign verify the overlay digest -> BUILD#prod record
+#
+# Terraform plan/apply lives in terraform.yml. Actions are pinned by commit SHA (Dependabot bumps them).
+name: platform-ci
+
+on:
+  pull_request:
+    branches: [staging, main]
+  push:
+    branches: [staging, main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  AWS_REGION: us-west-2
+  TABLE: rudyrod-showcase
+  TRIVY_VERSION: v0.76.1
+  COSIGN_VERSION: v3.1.4
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+  # Only images signed by this workflow on staging may be promoted.
+  SIGNER_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/platform-ci.yml@refs/heads/staging
+  SIGNER_ISSUER: https://token.actions.githubusercontent.com
+
+jobs:
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      app: ${{ steps.filter.outputs.app }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            app:
+              - 'app/**'
+              - 'Dockerfile'
+              - '.dockerignore'
+
+  # ---- Pull request checks ---------------------------------------------------
+
+  python:
+    name: Lint and test
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: |
+            app/requirements.txt
+            requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - run: ruff check .
+      - run: ruff format --check .
+      - run: pytest -q
+
+  dockerfile:
+    name: Dockerfile lint
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+
+  image:
+    name: Build and scan image
+    needs: changes
+    # Skipped (and so passing) for PRs that don't touch the image, like deploy PRs.
+    if: github.event_name == 'pull_request' && needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build (single arch, not pushed)
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          load: true
+          tags: showcase:pr
+          build-args: GIT_SHA=${{ github.event.pull_request.head.sha }}
+          cache-from: type=gha
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+      - name: Trivy (fail on fixable CRITICAL/HIGH)
+        run: trivy image --severity CRITICAL,HIGH --ignore-unfixed --exit-code 1 showcase:pr
+      - name: Image size
+        run: docker image ls showcase:pr --format 'size={{.Size}}' | tee -a "$GITHUB_STEP_SUMMARY"
+
+  manifests:
+    name: Validate manifests
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install kubeconform (checksum-verified)
+        run: |
+          curl -sSfLo kubeconform.tgz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c -
+          tar xzf kubeconform.tgz kubeconform && sudo mv kubeconform /usr/local/bin/
+      - run: make validate KUSTOMIZE="kubectl kustomize"
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: trufflesecurity/trufflehog@e63326d6545de8f425d93ce24078c6e68d83f70e # v3.99.3
+        with:
+          extra_args: --results=verified,unknown
+
+  promotion-gate:
+    name: Promotion gate
+    # Required on main; skipped (passing) for PRs into staging.
+    if: github.event_name == 'pull_request' && github.base_ref == 'main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only staging is promoted to main
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ "$HEAD_REF" != "staging" ]; then
+            echo "::error::PRs into main must come from staging (got '$HEAD_REF')"
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      - name: The digest being promoted was signed by the staging pipeline
+        run: |
+          digest=$(grep -oE 'sha256:[0-9a-f]{64}' k8s/overlays/live/kustomization.yaml)
+          cosign verify "$IMAGE@$digest" \
+            --certificate-identity "$SIGNER_IDENTITY" \
+            --certificate-oidc-issuer "$SIGNER_ISSUER" > /dev/null
+          echo "Verified $IMAGE@$digest" | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ---- Staging: build once ---------------------------------------------------
+
+  release-staging:
+    name: Build, scan, sign, deploy (staging)
+    needs: changes
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/staging'
+      && needs.changes.outputs.app == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: release-staging
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      packages: write # push to GHCR
+      id-token: write # cosign keyless signing + AWS OIDC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        run: echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+      - name: Build and push (arm64 + amd64)
+        id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64,linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            BUILD_TIME=${{ steps.meta.outputs.build_time }}
+          sbom: true
+          provenance: mode=max
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+      - name: Trivy the pushed digest (fail on fixable CRITICAL/HIGH)
+        env:
+          REF: ${{ env.IMAGE }}@${{ steps.build.outputs.digest }}
+        run: |
+          trivy image --platform linux/arm64 --ignore-unfixed --format json --output trivy.json "$REF"
+          trivy convert --format table trivy.json
+          blocking=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity == "CRITICAL" or .Severity == "HIGH")] | length' trivy.json)
+          if [ "$blocking" -gt 0 ]; then
+            echo "::error::$blocking fixable CRITICAL/HIGH findings; not signing or deploying"
+            exit 1
+          fi
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      - name: Sign (keyless, identity = this workflow on staging)
+        run: cosign sign --yes "$IMAGE@${{ steps.build.outputs.digest }}"
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_BUILD_ROLE_STAGING }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Record BUILD#staging
+        run: scripts/ci/put-build-record.sh staging "$IMAGE@${{ steps.build.outputs.digest }}" trivy.json
+
+      - name: Point the overlay at the new digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          sed -i -E "s|(digest: )sha256:[0-9a-f]{64}|\1${DIGEST}|" k8s/overlays/live/kustomization.yaml
+          git diff --stat
+      # PRs opened with GITHUB_TOKEN don't trigger workflows, so their required checks
+      # would never run. A GitHub App token does.
+      - uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        id: app-token
+        with:
+          client-id: ${{ vars.DEPLOY_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DEPLOY_APP_PRIVATE_KEY }}
+      - name: Open the deploy PR
+        id: pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          base: staging
+          branch: deploy/staging
+          add-paths: k8s/overlays/live/kustomization.yaml
+          commit-message: "deploy: bump image to ${{ github.sha }}"
+          title: "deploy: bump image to ${{ github.sha }}"
+          body: |
+            Built from ${{ github.sha }} by [this run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}).
+
+            - Image: `${{ env.IMAGE }}@${{ steps.build.outputs.digest }}`
+            - Trivy: no fixable CRITICAL/HIGH findings
+            - Signed with cosign (keyless) by `platform-ci.yml@refs/heads/staging`
+
+            Merges automatically once checks pass; Argo CD then syncs `showcase-staging`.
+          delete-branch: true
+      - name: Enable auto-merge
+        if: steps.pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR: ${{ steps.pr.outputs.pull-request-number }}
+        run: gh pr merge "$PR" --repo "$GITHUB_REPOSITORY" --auto --squash
+
+  # ---- Main: promote by merge, no rebuild --------------------------------------
+
+  release-prod:
+    name: Verify and record (prod)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # AWS OIDC
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: digest
+        run: echo "ref=$IMAGE@$(grep -oE 'sha256:[0-9a-f]{64}' k8s/overlays/live/kustomization.yaml)" >> "$GITHUB_OUTPUT"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      - name: cosign verify
+        run: |
+          cosign verify "${{ steps.digest.outputs.ref }}" \
+            --certificate-identity "$SIGNER_IDENTITY" \
+            --certificate-oidc-issuer "$SIGNER_ISSUER" > /dev/null
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          cache: true
+      # Fresh counts for the panel; the gate already ran on staging.
+      - name: Trivy (report only)
+        run: trivy image --platform linux/arm64 --ignore-unfixed --format json --output trivy.json "${{ steps.digest.outputs.ref }}"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_BUILD_ROLE_PROD }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Record BUILD#prod
+        run: scripts/ci/put-build-record.sh prod "${{ steps.digest.outputs.ref }}" trivy.json staging

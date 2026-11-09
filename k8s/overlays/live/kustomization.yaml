@@ -1,0 +1,20 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# One overlay for both environments. staging and main branches differ only
+# in the digest below, which reaches main by merging staging.
+resources:
+  - ../../base
+
+images:
+  - name: ghcr.io/rudyrod3/rudyrod-platform
+    # Written by CI's "deploy: bump image" PR (Phase 4). Until then, set it by
+    # hand to the digest of the first image pushed from the VM.
+    digest: sha256:2ce4fb7c3b859ffe525c89a3ddb0b9c9096e7034f66df3868b887be6d4b6934a
+
+configMapGenerator:
+  - name: showcase-config
+    literals:
+      # Lambda Function URL from `terraform output -raw function_url` (Phase 3).
+      # Public by design: heartbeats are authenticated by their HMAC signature.
+      - STATUS_API_URL=https://bvno6y53db36scsf3mqqag5vba0vnzbb.lambda-url.us-west-2.on.aws/

@@ -1,0 +1,7 @@
+# Test and lint tooling (not installed in the image)
+-r app/requirements.txt
+pytest==9.2.0
+httpx2==2.16.0
+ruff==0.17.3
+# Provided by the Lambda runtime; pinned here for tests only
+boto3==1.43.123

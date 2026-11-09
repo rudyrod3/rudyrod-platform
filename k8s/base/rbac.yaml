@@ -1,0 +1,33 @@
+# The API needs no Kubernetes access, so it gets its own SA with no token mounted.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: showcase-api
+automountServiceAccountToken: false
+---
+# The heartbeat reads pods in its own namespace and nothing else.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: heartbeat
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: heartbeat-pod-reader
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: heartbeat-pod-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: heartbeat-pod-reader
+subjects:
+  - kind: ServiceAccount
+    name: heartbeat

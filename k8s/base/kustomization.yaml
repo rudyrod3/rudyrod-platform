@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# No namespace here: each Argo CD Application sets its destination namespace,
+# so the same manifests land in showcase-staging and showcase-prod.
+resources:
+  - rbac.yaml
+  - deployment.yaml
+  - service.yaml
+  - cronjob.yaml
+  - networkpolicy.yaml
+
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: rudyrod-showcase
+      app.kubernetes.io/managed-by: argocd
