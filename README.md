@@ -267,11 +267,14 @@ this repo yet and CI's push would get `permission_denied`. Open the package sett
 (Packages → `rudyrod-platform` → Package settings) → **Manage Actions access** → add
 `rudyrod-platform` with **Write**.
 
-**Branch rulesets** (after the workflows have run once, so the check names exist): `staging`
+**Branch rulesets** (active): `staging`
 and `main` both require a pull request and the checks `Lint and test`, `Dockerfile lint`,
 `Build and scan image`, `Validate manifests`, `Secret scan`, `Promotion gate`, and
 `Terraform plan`, and block force pushes and deletion. Skipped checks count as passing, so
 `Promotion gate` only bites on `main` and `Terraform plan` only when infrastructure changed.
+
+Promote with a **merge commit** (not squash), so `main` keeps `staging`'s commits and later
+promotions don't conflict. Deploy PRs and feature PRs can be squashed.
 
 ### Rollback
 
