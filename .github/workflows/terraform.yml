@@ -45,6 +45,10 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
+          # On pushes, diff against the previous commit of this branch. Without this the
+          # action diffs against the default branch (staging), which after a promotion
+          # equals main, so nothing on main would ever count as changed.
+          base: ${{ github.event_name == 'push' && github.event.before || '' }}
           filters: |
             infra:
               - 'infra/terraform/**'
