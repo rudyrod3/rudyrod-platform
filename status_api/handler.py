@@ -10,6 +10,10 @@ Table layout (`pk` / `sk`):
     BUILD#<env> / BUILD    written by GitHub Actions through OIDC (its own partition, so IAM
                            dynamodb:LeadingKeys can stop CI from touching anything else)
     SITE        / VISITS   written here, from POST /visit
+
+STATUS may include `argocd` ({revision, sync, health, synced_at}): what Argo CD has synced,
+as the heartbeat read it from its own Application. Each heartbeat replaces the whole item,
+so one without `argocd` clears it rather than leaving a stale revision on the panel.
 """
 
 import base64
@@ -33,6 +37,10 @@ STATUS_CACHE_SECONDS = 10
 KEY_CACHE_SECONDS = 5 * 60
 # The only heartbeat fields we store; anything else in the payload is dropped.
 HEARTBEAT_FIELDS = ("namespace", "commit", "node_arch", "image_digests", "pods_ready", "pods_total", "pods")
+# The optional `argocd` object is cleaned separately (see clean_argocd).
+ARGOCD_FIELDS = ("revision", "sync", "health", "synced_at")
+ARGOCD_MAX_LEN = 64
+SHA_RE = re.compile(r"[0-9a-f]{40}")
 
 TABLE_NAME = os.environ.get("TABLE_NAME", "rudyrod-showcase")
 SSM_PREFIX = os.environ.get("SSM_PREFIX", "/showcase")
@@ -92,6 +100,18 @@ def plain(value):
     if isinstance(value, list):
         return [plain(v) for v in value]
     return value
+
+
+def clean_argocd(value) -> dict | None:
+    """Keep only the known Argo CD fields, as short non-empty strings; None without a full SHA."""
+    if not isinstance(value, dict):
+        return None
+    cleaned = {
+        k: v for k in ARGOCD_FIELDS if isinstance(v := value.get(k), str) and 0 < len(v) <= ARGOCD_MAX_LEN
+    }
+    if not SHA_RE.fullmatch(cleaned.get("revision", "")):
+        return None
+    return cleaned
 
 
 def cors_headers(origin: str | None) -> dict:
@@ -185,6 +205,8 @@ def post_heartbeat(event: dict) -> dict:
         raise HttpError(400, "payload timestamp does not match header")
 
     item = {k: payload[k] for k in HEARTBEAT_FIELDS if k in payload}
+    if (argocd := clean_argocd(payload.get("argocd"))) is not None:
+        item["argocd"] = argocd
     item.update(pk=f"ENV#{env}", sk="STATUS", heartbeat_ts=ts, received_at=int(time.time()))
     try:
         # Only move forward in time: a replayed (older or identical) heartbeat is rejected.

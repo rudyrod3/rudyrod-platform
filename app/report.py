@@ -17,6 +17,12 @@ Environment:
     ENVIRONMENT      optional override; otherwise derived from the namespace (showcase-prod -> prod)
     API_SELECTOR     label selector for the API pods (default app.kubernetes.io/name=showcase-api)
     GIT_SHA          commit baked into the image at build time
+    ARGOCD_NAMESPACE namespace of the Argo CD Applications (default argocd)
+    ARGOCD_APP       this environment's Application (default: the pod's namespace, e.g. showcase-prod)
+
+The payload also carries `argocd` (revision, sync, health, synced_at) when the job can read
+its own Application. That read is best effort: without it (no RBAC yet, Argo CD down) the
+heartbeat is still sent, just without `argocd`.
 """
 
 import argparse
@@ -25,6 +31,7 @@ import hmac
 import json
 import os
 import platform
+import re
 import ssl
 import sys
 import time
@@ -35,6 +42,9 @@ import urllib.request
 SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
 DEFAULT_API_SELECTOR = "app.kubernetes.io/name=showcase-api"
 TIMEOUT_SECONDS = 10
+# Optional call; kept short so it can't eat the Job's activeDeadlineSeconds.
+ARGOCD_TIMEOUT_SECONDS = 5
+SHA_RE = re.compile(r"[0-9a-f]{40}")
 ARCH_ALIASES = {"aarch64": "arm64", "x86_64": "amd64"}
 
 
@@ -61,19 +71,68 @@ def in_cluster() -> bool:
     return bool(os.getenv("KUBERNETES_SERVICE_HOST")) and os.path.exists(f"{SA_DIR}/token")
 
 
-def list_pods(ns: str) -> list[dict]:
-    """GET /api/v1/namespaces/<ns>/pods with the pod's own ServiceAccount (read-only RBAC)."""
+def kube_get(path: str, timeout: float = TIMEOUT_SECONDS) -> dict:
+    """GET a Kubernetes API path with the pod's own ServiceAccount token."""
     host = os.environ["KUBERNETES_SERVICE_HOST"]
     if ":" in host:  # IPv6 service address
         host = f"[{host}]"
     port = os.getenv("KUBERNETES_SERVICE_PORT", "443")
     with open(f"{SA_DIR}/token") as f:
         token = f.read().strip()
-    url = f"https://{host}:{port}/api/v1/namespaces/{urllib.parse.quote(ns)}/pods"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+    req = urllib.request.Request(f"https://{host}:{port}{path}", headers={"Authorization": f"Bearer {token}"})
     ctx = ssl.create_default_context(cafile=f"{SA_DIR}/ca.crt")
-    with urllib.request.urlopen(req, context=ctx, timeout=TIMEOUT_SECONDS) as resp:  # noqa: S310 (https, built above)
-        return json.load(resp)["items"]
+    with urllib.request.urlopen(req, context=ctx, timeout=timeout) as resp:  # noqa: S310 (https, built above)
+        return json.load(resp)
+
+
+def list_pods(ns: str) -> list[dict]:
+    """GET /api/v1/namespaces/<ns>/pods (read-only RBAC in k8s/base/rbac.yaml)."""
+    return kube_get(f"/api/v1/namespaces/{urllib.parse.quote(ns)}/pods")["items"]
+
+
+def summarize_app(app: dict) -> dict | None:
+    """Reduce an Argo CD Application to what the panel shows. None without a full commit SHA."""
+    status = app.get("status") if isinstance(app, dict) else None
+    if not isinstance(status, dict):
+        return None
+
+    def field(*keys):
+        value = status
+        for k in keys:
+            value = value.get(k) if isinstance(value, dict) else None
+        return value if isinstance(value, str) and value else None
+
+    revision = field("sync", "revision")
+    if revision is None or not SHA_RE.fullmatch(revision):
+        return None
+    summary = {
+        "revision": revision,
+        "sync": field("sync", "status"),
+        "health": field("health", "status"),
+        "synced_at": field("operationState", "finishedAt"),
+    }
+    return {k: v for k, v in summary.items() if v is not None}
+
+
+def argocd_status(ns: str) -> dict | None:
+    """Best effort: this environment's Argo CD sync state, or None if it can't be read."""
+    app_ns = os.getenv("ARGOCD_NAMESPACE", "argocd")
+    app = os.getenv("ARGOCD_APP") or ns
+    path = (
+        f"/apis/argoproj.io/v1alpha1/namespaces/{urllib.parse.quote(app_ns)}"
+        f"/applications/{urllib.parse.quote(app)}"
+    )
+    try:
+        summary = summarize_app(kube_get(path, timeout=ARGOCD_TIMEOUT_SECONDS))
+    except urllib.error.HTTPError as e:  # 403 until argocd/heartbeat-rbac.yaml is applied
+        log("warn", "could not read Argo CD Application", app=app, status=e.code)
+        return None
+    except (OSError, ValueError, KeyError) as e:  # URLError, timeouts, bad JSON, no service env
+        log("warn", "could not read Argo CD Application", app=app, error=str(e))
+        return None
+    if summary is None:
+        log("warn", "Argo CD Application has no synced revision", app=app)
+    return summary
 
 
 def matches(labels: dict, selector: str) -> bool:
@@ -113,7 +172,9 @@ def is_finished_job_pod(pod: dict) -> bool:
     return phase == "Failed" and any(o.get("kind") == "Job" for o in owners)
 
 
-def build_payload(pods: list[dict], ns: str, now: int, selector: str = DEFAULT_API_SELECTOR) -> dict:
+def build_payload(
+    pods: list[dict], ns: str, now: int, selector: str = DEFAULT_API_SELECTOR, argocd: dict | None = None
+) -> dict:
     live = [p for p in pods if not is_finished_job_pod(p)]
     summaries = [summarize_pod(p) for p in live]
 
@@ -128,7 +189,7 @@ def build_payload(pods: list[dict], ns: str, now: int, selector: str = DEFAULT_A
     )
 
     machine = platform.machine()
-    return {
+    payload = {
         "env": environment(ns),
         "namespace": ns,
         "timestamp": now,
@@ -140,6 +201,9 @@ def build_payload(pods: list[dict], ns: str, now: int, selector: str = DEFAULT_A
         "pods_total": len(summaries),
         "pods": summaries,
     }
+    if argocd is not None:
+        payload["argocd"] = argocd
+    return payload
 
 
 def sign(key: bytes, timestamp: int, body: bytes) -> str:
@@ -177,8 +241,10 @@ def main(argv: list[str] | None = None) -> int:
     ns = namespace()
     selector = os.getenv("API_SELECTOR", DEFAULT_API_SELECTOR)
 
+    argocd = None
     if in_cluster():
         pods = list_pods(ns)
+        argocd = argocd_status(ns)
     elif args.dry_run:
         log("warn", "not running in a cluster; reporting no pods")
         pods = []
@@ -186,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         log("error", "not running in a cluster (no ServiceAccount token)")
         return 2
 
-    payload = build_payload(pods, ns, int(time.time()), selector)
+    payload = build_payload(pods, ns, int(time.time()), selector, argocd)
 
     if args.dry_run:
         print(json.dumps(payload, indent=2))
@@ -208,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         env=payload["env"],
         pods_ready=payload["pods_ready"],
         pods_total=payload["pods_total"],
+        argocd_revision=(argocd or {}).get("revision", "")[:7] or None,
     )
     return 0 if level == "info" else 1
 

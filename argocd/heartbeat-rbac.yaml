@@ -1,0 +1,55 @@
+# Lets each environment's heartbeat read its own Argo CD Application (and nothing else),
+# so the panel can show the deployed config revision, not just the image's commit.
+#
+# Lives here, not in k8s/, because k8s/overlays/live is shared by both environments while
+# these names differ per environment. Applied by scripts/bootstrap-cluster.sh
+# (`kubectl apply -f argocd/`) or by hand: kubectl apply -f argocd/heartbeat-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: heartbeat-read-showcase-staging
+  namespace: argocd
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    resourceNames: ["showcase-staging"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: heartbeat-read-showcase-staging
+  namespace: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: heartbeat-read-showcase-staging
+subjects:
+  - kind: ServiceAccount
+    name: heartbeat
+    namespace: showcase-staging
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: heartbeat-read-showcase-prod
+  namespace: argocd
+rules:
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications"]
+    resourceNames: ["showcase-prod"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: heartbeat-read-showcase-prod
+  namespace: argocd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: heartbeat-read-showcase-prod
+subjects:
+  - kind: ServiceAccount
+    name: heartbeat
+    namespace: showcase-prod
