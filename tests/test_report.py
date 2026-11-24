@@ -9,9 +9,13 @@ from app import report
 DIGEST = "sha256:" + "a" * 64
 
 
-def pod(name, phase="Running", ready=True, labels=None, image_id=f"ghcr.io/x/y@{DIGEST}"):
+def pod(name, phase="Running", ready=True, labels=None, image_id=f"ghcr.io/x/y@{DIGEST}", owner=None):
     return {
-        "metadata": {"name": name, "labels": labels or {}},
+        "metadata": {
+            "name": name,
+            "labels": labels or {},
+            "ownerReferences": [{"kind": owner, "name": "x"}] if owner else [],
+        },
         "spec": {"nodeName": "vm"},
         "status": {
             "phase": phase,
@@ -39,6 +43,22 @@ def test_payload_counts_live_pods_and_finds_api_digest(monkeypatch):
     assert payload["image_digests"] == [DIGEST]
     assert payload["node_arch"]
     assert [p["name"] for p in payload["pods"]] == ["showcase-api-1", "heartbeat-now"]
+
+
+def test_failed_heartbeat_runs_do_not_count_but_failed_api_pods_do(monkeypatch):
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    pods = [
+        pod("showcase-api-1", labels=API, owner="ReplicaSet"),
+        pod("showcase-api-evicted", phase="Failed", ready=False, labels=API, owner="ReplicaSet"),
+        pod("heartbeat-failed-1", phase="Failed", ready=False, owner="Job"),
+        pod("heartbeat-failed-2", phase="Failed", ready=False, owner="Job"),
+        pod("heartbeat-now", owner="Job"),
+    ]
+
+    payload = report.build_payload(pods, "showcase-staging", now=1_800_000_000)
+
+    assert [p["name"] for p in payload["pods"]] == ["showcase-api-1", "showcase-api-evicted", "heartbeat-now"]
+    assert (payload["pods_ready"], payload["pods_total"]) == (2, 3)
 
 
 def test_environment_override(monkeypatch):

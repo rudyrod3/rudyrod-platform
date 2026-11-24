@@ -100,9 +100,21 @@ def summarize_pod(pod: dict) -> dict:
     }
 
 
+def is_finished_job_pod(pod: dict) -> bool:
+    """A completed or failed run of a Job (the heartbeat): history, not workload.
+
+    Failed pods that don't belong to a Job (an evicted API pod, say) still count,
+    because those are worth seeing on the panel.
+    """
+    phase = pod.get("status", {}).get("phase")
+    if phase == "Succeeded":
+        return True
+    owners = pod["metadata"].get("ownerReferences") or []
+    return phase == "Failed" and any(o.get("kind") == "Job" for o in owners)
+
+
 def build_payload(pods: list[dict], ns: str, now: int, selector: str = DEFAULT_API_SELECTOR) -> dict:
-    # Finished heartbeat Job pods are history, not workload, so they don't count.
-    live = [p for p in pods if p.get("status", {}).get("phase") != "Succeeded"]
+    live = [p for p in pods if not is_finished_job_pod(p)]
     summaries = [summarize_pod(p) for p in live]
 
     digests = sorted(
