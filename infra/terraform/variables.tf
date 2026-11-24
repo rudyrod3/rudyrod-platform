@@ -72,7 +72,11 @@ variable "allowed_origins" {
 }
 
 variable "preview_origin_regex" {
-  description = "Regex for Vercel preview origins (full match). Tighten to your team slug suffix."
+  description = <<-EOT
+    Regex for Vercel preview origins (full match). Covers both per-commit
+    (rudyrod-site-<hash>-build-239d) and per-branch (rudyrod-site-git-<branch>-build-239d)
+    URLs, and only for this Vercel team (the -build-239d suffix).
+  EOT
   type        = string
-  default     = "^https://rudyrod-me-[a-z0-9-]+\\.vercel\\.app$"
+  default     = "^https://rudyrod-site-[a-z0-9-]+-build-239d\\.vercel\\.app$"
 }

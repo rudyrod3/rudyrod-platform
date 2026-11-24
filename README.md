@@ -4,6 +4,61 @@ The backend for the **Live Infrastructure** panel on [rudyrod.me](https://rudyro
 a Docker image running on k3s at home, deployed by Argo CD, reporting its status to an
 AWS Lambda + DynamoDB backend that is built with Terraform.
 
+## How this works
+
+The panel shows a real system: a container running on a Kubernetes cluster in my home lab,
+the pipeline that built and shipped it, and the AWS backend that reports on it. It runs for
+about $0 a month.
+
+```mermaid
+flowchart LR
+  subgraph GH["GitHub"]
+    repo["rudyrod-platform repo"]
+    ci["GitHub Actions<br/>test · build · Trivy · cosign"]
+    ghcr["GHCR<br/>signed multi-arch image"]
+  end
+  subgraph HOME["Home lab (Ubuntu ARM64 VM)"]
+    argo["Argo CD"]
+    api["showcase-api pod"]
+    hb["heartbeat CronJob<br/>every 5 min"]
+  end
+  subgraph AWS["AWS (us-west-2)"]
+    lambda["Lambda<br/>Function URL"]
+    ddb[("DynamoDB")]
+  end
+  site["rudyrod.me<br/>Live Infrastructure panel"]
+
+  repo --> ci --> ghcr
+  ci -- "BUILD record (OIDC, no keys)" --> lambda
+  argo -- "pulls manifests" --> repo
+  argo -- "pulls image by digest" --> ghcr
+  argo --> api
+  hb -- "HMAC-signed status (outbound)" --> lambda
+  lambda <--> ddb
+  site -- "GET /status" --> lambda
+```
+
+Three design decisions carry the whole thing:
+
+- **The site never depends on the home lab.** The website reads only from AWS. The cluster
+  pushes its status there every five minutes, so if the VM is off, the panel shows the last
+  known state with "cluster offline since…" instead of breaking.
+- **Build once, promote by merge.** Every change goes `feature → staging → main`. CI builds
+  and signs the image once on `staging`; promoting to production is a merge that carries the
+  same image digest, and production refuses any image the staging pipeline didn't sign.
+- **No inbound ports, no long-lived keys.** Argo CD pulls from GitHub, the heartbeat pushes
+  outbound, and CI reaches AWS through GitHub's OIDC tokens, so nothing listens on the home
+  network and no AWS credentials are stored anywhere.
+
+| Panel card | Comes from |
+| --- | --- |
+| Docker | The image CI built: digest, cosign signature, Trivy findings, size |
+| Kubernetes | The heartbeat: pods and their readiness, node architecture, last report time |
+| AWS | The Lambda and DynamoDB serving the panel itself, plus the visitor count |
+| Pipeline | The commit that built the running image, and whether it was promoted from staging |
+
+The rest of this README is the build and operations guide.
+
 ## The showcase service (`app/`)
 
 One image, two modes:
