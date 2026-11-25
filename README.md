@@ -53,9 +53,9 @@ Three design decisions carry the whole thing:
 | Panel card | Comes from |
 | --- | --- |
 | Docker | The image CI built: digest, cosign signature, Trivy findings, size |
-| Kubernetes | The heartbeat: pods and their readiness, node architecture, last report time |
+| Kubernetes | The heartbeat: pods and their readiness, node architecture, last report time, and Argo CD's sync and health |
 | AWS | The Lambda and DynamoDB serving the panel itself, plus the visitor count |
-| Pipeline | The commit that built the running image, and whether it was promoted from staging |
+| Pipeline | The commit that built the running image, whether it was promoted from staging, and the config revision Argo CD has synced (which moves on manifest-only changes too) |
 
 The rest of this README is the build and operations guide.
 
@@ -113,6 +113,12 @@ k3s on the home VM, deployed by Argo CD **pulling** from this repo. No inbound p
 read-only RBAC for the heartbeat, and a default-deny NetworkPolicy that opens only port 8080
 on the API. Both namespaces enforce the `restricted` Pod Security Standard.
 
+The heartbeat also reports what Argo CD has synced (revision, sync and health status, last
+sync time) by reading its own Application. [argocd/heartbeat-rbac.yaml](argocd/heartbeat-rbac.yaml)
+allows exactly that: `get` on one named Application per environment, from the `argocd`
+namespace. It's per environment, so it lives in `argocd/` rather than the shared overlay. The
+read is best effort: without the RBAC the heartbeat logs a 403 and is sent without it.
+
 ### First-time setup (on the VM)
 
 **1. Push a first image** so the overlay has a real digest (CI does this from Phase 4 on):
@@ -163,6 +169,17 @@ done
 ```
 
 Argo CD ignores `spec.suspend`, so the patch sticks. Resume with `"suspend":false`.
+
+**4. Let the heartbeat read its Argo CD Application** (once; `bootstrap-cluster.sh` already
+applies everything in `argocd/` on a fresh cluster):
+
+```bash
+kubectl apply -f argocd/heartbeat-rbac.yaml
+kubectl auth can-i get applications.argoproj.io/showcase-staging -n argocd \
+  --as=system:serviceaccount:showcase-staging:heartbeat     # yes
+kubectl auth can-i get applications.argoproj.io/showcase-prod -n argocd \
+  --as=system:serviceaccount:showcase-staging:heartbeat     # no
+```
 
 ### Validate manifests
 
