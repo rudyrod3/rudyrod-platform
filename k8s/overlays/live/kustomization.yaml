@@ -10,7 +10,7 @@ images:
   - name: ghcr.io/rudyrod3/rudyrod-platform
     # Written by CI's "deploy: bump image" PR (Phase 4). Until then, set it by
     # hand to the digest of the first image pushed from the VM.
-    digest: sha256:10a180290ddaa2fa5b35cfe0790b8d2c793a61ae246a7502cba32a1345919699
+    digest: sha256:16a907a7f7d827ba8b9c51d578a4927fec7899ee0dc64c177e6103bd36f383c9
 
 configMapGenerator:
   - name: showcase-config
