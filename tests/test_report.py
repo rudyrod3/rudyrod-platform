@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import json
+import urllib.error
 
 import pytest
 
@@ -102,3 +103,102 @@ def test_send_requires_config(monkeypatch):
 def test_rejects_plain_http_url():
     with pytest.raises(ValueError):
         report.post_heartbeat("http://example.com", b"k", {"timestamp": 1})
+
+
+# ---- Argo CD revision ------------------------------------------------------
+
+SHA = "2ffcaff" + "0" * 33
+
+
+def application(**status):
+    return {"metadata": {"name": "showcase-staging"}, "status": status}
+
+
+FULL_APP = application(
+    sync={"status": "Synced", "revision": SHA},
+    health={"status": "Healthy"},
+    operationState={"phase": "Succeeded", "finishedAt": "2026-11-24T21:27:10Z"},
+)
+
+
+def test_summarize_full_application():
+    assert report.summarize_app(FULL_APP) == {
+        "revision": SHA,
+        "sync": "Synced",
+        "health": "Healthy",
+        "synced_at": "2026-11-24T21:27:10Z",
+    }
+
+
+@pytest.mark.parametrize(
+    "app",
+    [
+        application(sync={"status": "Synced"}),  # no revision
+        application(sync={"status": "Synced", "revision": "2ffcaff"}),  # short sha
+        application(sync={"status": "Synced", "revision": SHA.upper()}),  # not lowercase hex
+        application(sync={"status": "Synced", "revision": "v1.2.3"}),  # a tag, not a sha
+        application(sync={"revision": 123}),  # not a string
+        application(),
+        {"metadata": {}},  # no status at all
+        [],  # not an object
+    ],
+)
+def test_summarize_requires_full_sha(app):
+    assert report.summarize_app(app) is None
+
+
+def test_summarize_drops_missing_or_non_string_fields():
+    app = application(sync={"revision": SHA, "status": None}, health="Healthy")  # no operationState
+    assert report.summarize_app(app) == {"revision": SHA}
+
+
+def test_argocd_status_reads_own_application(monkeypatch):
+    calls = []
+    monkeypatch.delenv("ARGOCD_NAMESPACE", raising=False)
+    monkeypatch.delenv("ARGOCD_APP", raising=False)
+    monkeypatch.setattr(report, "kube_get", lambda path, timeout: calls.append((path, timeout)) or FULL_APP)
+
+    assert report.argocd_status("showcase-staging")["revision"] == SHA
+    assert calls == [("/apis/argoproj.io/v1alpha1/namespaces/argocd/applications/showcase-staging", 5)]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        urllib.error.HTTPError("u", 403, "Forbidden", {}, None),
+        urllib.error.HTTPError("u", 404, "Not Found", {}, None),
+        TimeoutError("timed out"),
+        urllib.error.URLError("connection refused"),
+        json.JSONDecodeError("bad", "x", 0),
+    ],
+)
+def test_argocd_status_is_best_effort(monkeypatch, error):
+    def fail(path, timeout):
+        raise error
+
+    monkeypatch.setattr(report, "kube_get", fail)
+    assert report.argocd_status("showcase-staging") is None
+
+
+def test_payload_includes_argocd_only_when_known(monkeypatch):
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    summary = {"revision": SHA, "sync": "Synced"}
+
+    with_argo = report.build_payload([], "showcase-prod", now=1, argocd=summary)
+    without = report.build_payload([], "showcase-prod", now=1)
+
+    assert with_argo["argocd"] == summary
+    assert "argocd" not in without
+
+
+def test_heartbeat_still_sent_when_argocd_unreadable(monkeypatch):
+    sent = {}
+    monkeypatch.setattr(report, "in_cluster", lambda: True)
+    monkeypatch.setattr(report, "list_pods", lambda ns: [])
+    monkeypatch.setattr(report, "argocd_status", lambda ns: None)
+    monkeypatch.setattr(report, "post_heartbeat", lambda url, key, payload: sent.update(payload) or 200)
+    monkeypatch.setenv("HMAC_KEY", "k")
+    monkeypatch.setenv("STATUS_API_URL", "https://example.com")
+
+    assert report.main([]) == 0
+    assert sent and "argocd" not in sent

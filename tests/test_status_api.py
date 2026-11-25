@@ -156,3 +156,51 @@ def test_preflight_and_unknown_routes():
     assert h.handler(event("OPTIONS", "/visit"))["statusCode"] == 204
     assert call(event("GET", "/nope"))[0] == 404
     assert call(event("GET", "/visit"))[0] == 405
+
+
+# ---- Argo CD revision ------------------------------------------------------
+
+SHA = "2ffcaff" + "0" * 33
+ARGOCD = {"revision": SHA, "sync": "Synced", "health": "Healthy", "synced_at": "2026-11-24T21:27:10Z"}
+
+
+def test_heartbeat_stores_argocd_and_status_returns_it(fake_aws):
+    assert call(heartbeat_event(argocd=dict(ARGOCD, extra="dropped")))[0] == 200
+    assert fake_aws.items[("ENV#prod", "STATUS")]["argocd"] == ARGOCD
+
+    _, body, _ = call(event("GET", "/status", query={"env": "prod"}))
+    assert body["status"]["argocd"] == ARGOCD
+
+
+def test_argocd_fields_are_cleaned(fake_aws):
+    sent = {"revision": SHA, "sync": "Synced", "health": "x" * 65, "synced_at": "", "phase": "Succeeded"}
+    assert call(heartbeat_event(argocd=sent))[0] == 200
+    assert fake_aws.items[("ENV#prod", "STATUS")]["argocd"] == {"revision": SHA, "sync": "Synced"}
+
+
+@pytest.mark.parametrize(
+    "argocd",
+    [
+        {"revision": "2ffcaff", "sync": "Synced"},  # short sha
+        {"revision": SHA.upper()},
+        {"revision": "x" * 40},
+        {"sync": "Synced"},  # no revision
+        {"revision": 42},
+        SHA,  # not an object
+        [ARGOCD],
+        None,
+    ],
+)
+def test_bad_argocd_is_not_stored(fake_aws, argocd):
+    assert call(heartbeat_event(argocd=argocd))[0] == 200
+    assert "argocd" not in fake_aws.items[("ENV#prod", "STATUS")]
+
+
+def test_heartbeat_without_argocd_clears_it(fake_aws):
+    now = int(time.time())
+    assert call(heartbeat_event(ts=now - 60, argocd=ARGOCD))[0] == 200
+    assert call(heartbeat_event(ts=now))[0] == 200
+    assert "argocd" not in fake_aws.items[("ENV#prod", "STATUS")]
+
+    _, body, _ = call(event("GET", "/status", query={"env": "prod"}))
+    assert "argocd" not in body["status"]
